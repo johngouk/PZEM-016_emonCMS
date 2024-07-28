@@ -6,10 +6,14 @@ int myFunction(int, int);
 void setup() {
   // put your setup code here, to run once:
   int result = myFunction(2, 3);
+  Serial.begin(115200);
+  Serial.println("[started]");
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
+  Serial.println("[loop]");
+  delay(10);
 }
 
 // put function definitions here:
