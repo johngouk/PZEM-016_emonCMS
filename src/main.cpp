@@ -1,3 +1,16 @@
+/*
+  ESP32 program to collect energy data from PZEM-016 over Modbus
+  and publish it to MQTT in a form acceptable to EmonCMS 
+  i.e. "emon/ASHP/<subjectName>" (I use ASHP as my Node name in EmonCMS).
+
+  Change Log:
+  2024-08-05  Initial version with single JSON message
+  2024-08-05  Revised for individual messages, one per Topic, and to use appropriate names
+              for the topics, so they match my existing setup. That way I don't lose all
+              my previous data when I have to reconfigure the Inputs/Feeds
+
+*/
+
 #include <Arduino.h>
 
 // Update these with values suitable for your network.
@@ -7,39 +20,36 @@ const char* password = "nor265cot";
 const char* mqtt_server = "server.local";
 #define mqtt_user "emonpi"
 #define mqtt_pwd "emonpimqtt2016"
+const char* baseTopic = "emon/ASHP/";
 unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE	(50)
 char msg[MSG_BUFFER_SIZE];
 int value = 0;
 
-/*
-    modbus.h
-    Definitions etc. for the reading of a ModBusRTU protocol energy meter
-*/
 
 #include <ModbusRTUMaster.h>
-#ifdef ARDUINO_ARCH_ESP8266
+#ifdef ESP8266
 #include <ESP8266WiFi.h>
 #include <SoftwareSerial.h>
-SoftwareSerial modbusSerial;
 #define SERIAL_CONFIG (SWSERIAL_8N1)
 #define SERIAL_FLUSH_TX_ONLY // empty, as SoftwareSerial.flush() takes no parameter
-#define MODBUS_RX 13
-#define MODBUS_TX 15
-#else
+#define MODBUS_RX D6
+#define MODBUS_TX D7
+SoftwareSerial modbusSerial(MODBUS_RX, MODBUS_TX);
+ModbusRTUMaster modbus(modbusSerial);
+#elif ESP32
 #include <WiFi.h>
 HardwareSerial modbusSerial(2);
-ModbusRTUMaster modbus (modbusSerial);
+ModbusRTUMaster modbus(modbusSerial);
 #define SERIAL_CONFIG (SERIAL_8N1)
 #define SERIAL_FLUSH_TX_ONLY false
 #define MODBUS_RX 16
 #define MODBUS_TX 17
 #endif
 
-
 #define MODBUS_SLAVE_ADDR 1
 #define MODBUS_REG_START 0
-#define MODBUS_REG_COUNT 8
+#define MODBUS_REG_COUNT 9
 
 #include <PubSubClient.h>
 
@@ -48,24 +58,29 @@ PubSubClient client(espClient);
 
 const char * valueNames[] = {
     "voltage",
-    "current",
-    "power",
-    "energy",
-    "freq",
+    "current_b",
+    "power_b",
+    "energy_forward_b",
+    "frequency",
+	  "power_factor_b"
 };
 
+// Don't use this other than to define how long the buffer needs to be!
 struct energyData {
     int16_t voltage;
     int16_t current[2];
     int16_t power[2];
     int16_t energy[2];
     int16_t freq;
+    int16_t pf;
 };
-
+// which is here
 uint16_t dataBuf[sizeof(energyData)/2];
 
 #define MAX_MSG_SIZE 128
 char jsonbuff[MAX_MSG_SIZE] = "{\0";
+#define MAX_VALUE_SIZE 20
+char valueBuf[MAX_VALUE_SIZE] = "\0";
 
 void setup_wifi() {
 
@@ -97,7 +112,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
   Serial.print("] ");
-  for (int i = 0; i < length; i++) {
+  for (unsigned int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
   }
   Serial.println("]");
@@ -137,7 +152,7 @@ void startModbus() {
 bool readModbusValues(){
   // Test data to check printf works
   uint16_t dummy = 0x0101;
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < MODBUS_REG_COUNT; i++) {
     dataBuf[i] = dummy;
     dummy = dummy + 0x0101;
   }
@@ -151,16 +166,23 @@ bool readModbusValues(){
         Serial.printf(" 0x%04x ", dataBuf[i]);
     }
     Serial.println("]");
-    float values [5];
+    float values [6];
     values[0] = dataBuf[0] * 0.1;                           // Voltage(0.1V)
     values[1] = (dataBuf[1] + (dataBuf[2] << 16)) * 0.001;  // Current(0.001A)
     values[2] = (dataBuf[3] + (dataBuf[4] << 16)) * 0.1;    // Power(0.1W)
     values[3] = (dataBuf[5] + (dataBuf[6] << 16));          // Energy(1Wh)
     values[4] = dataBuf[7] * 0.1;                           // Frequency
+	  values[5] = dataBuf[8] * 0.01;							// Power Factor
     Serial.print("[values: ");
-    for (int i = 0;i<5;i++){
+    String mqtt_topic = baseTopic;
+    for (int i = 0;i<6;i++){
       Serial.printf(" %f ", values[i]);
-      snprintf(jsonbuff + strlen(jsonbuff), MAX_MSG_SIZE - strlen(jsonbuff), "\"%s\":%f,", valueNames[i], values[i]);
+      snprintf(jsonbuff + strlen(jsonbuff), MAX_MSG_SIZE - strlen(jsonbuff), "\"%s\":%.3f,", valueNames[i], values[i]);
+      mqtt_topic.concat(valueNames[i]);
+      snprintf(valueBuf + strlen(valueBuf), MAX_VALUE_SIZE - strlen(valueBuf), "%.3f,", values[i]);
+      client.publish(mqtt_topic.c_str(), valueBuf);
+      mqtt_topic = baseTopic;
+      strcpy(valueBuf, "\0x");
     }
     jsonbuff[strlen(jsonbuff) - 1] = '}';
     Serial.println("]");
@@ -198,7 +220,7 @@ bool readModbusValues(){
       modbus.clearExceptionResponse();
     }
     Serial.println();
-  }
+  } 
   return result;
 
 }
@@ -219,14 +241,14 @@ void setup() {
 }
 
 void loop() {
-  // int result;
+	bool result;
   Serial.println("[loop]");
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
 
-  readModbusValues();
+  result = readModbusValues();
 
   Serial.flush();
   delay(10000);
