@@ -179,7 +179,7 @@ bool readModbusValues(){
       Serial.printf(" %f ", values[i]);
       snprintf(jsonbuff + strlen(jsonbuff), MAX_MSG_SIZE - strlen(jsonbuff), "\"%s\":%.3f,", valueNames[i], values[i]);
       mqtt_topic.concat(valueNames[i]);
-      snprintf(valueBuf + strlen(valueBuf), MAX_VALUE_SIZE - strlen(valueBuf), "%.3f,", values[i]);
+      snprintf(valueBuf + strlen(valueBuf), MAX_VALUE_SIZE - strlen(valueBuf), "%.3f", values[i]);
       client.publish(mqtt_topic.c_str(), valueBuf);
       mqtt_topic = baseTopic;
       strcpy(valueBuf, "\0x");
