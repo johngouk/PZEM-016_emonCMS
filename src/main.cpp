@@ -15,11 +15,11 @@
 
 // Update these with values suitable for your network.
 
-const char* ssid = "norcot";
-const char* password = "nor265cot";
-const char* mqtt_server = "server.local";
-#define mqtt_user "emonpi"
-#define mqtt_pwd "emonpimqtt2016"
+const char* ssid = "mySSID";
+const char* password = "myPassword";
+const char* mqtt_server = "mqttserver.local";
+#define mqtt_user "mqttUser"
+#define mqtt_pwd "mqttPwd"
 const char* baseTopic = "emon/ASHP/";
 unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE	(50)
@@ -62,7 +62,7 @@ const char * valueNames[] = {
     "power_b",
     "energy_forward_b",
     "frequency",
-	  "power_factor_b"
+    "power_factor_b"
 };
 
 // Don't use this other than to define how long the buffer needs to be!
@@ -241,7 +241,7 @@ void setup() {
 }
 
 void loop() {
-	bool result;
+  bool result;
   Serial.println("[loop]");
   if (!client.connected()) {
     reconnect();
