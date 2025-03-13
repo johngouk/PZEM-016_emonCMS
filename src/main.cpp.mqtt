@@ -8,41 +8,19 @@
   2024-08-05  Revised for individual messages, one per Topic, and to use appropriate names
               for the topics, so they match my existing setup. That way I don't lose all
               my previous data when I have to reconfigure the Inputs/Feeds
-  2025-03-12  Decided to switch to actually using this code, but modified to use HTTP interface because
-              that's loads more reliable than MQTT and less grief... or so I thought!! Had to add URL encoding
-              to the payload for both GET and POST, also some random 404s etc. from the EmonCMS instance
-              Maybe MQTT is better?!
 
 */
 
 #include <Arduino.h>
-#include <time.h>
-
-#define MY_LOG_LEVEL ESP_LOG_DEBUG
-#include <esp_log.h>  // have to include this manually
-
-#define LOG_NAME "MyLog"
 
 // Update these with values suitable for your network.
 
 const char* ssid = "norcot";
 const char* password = "nor265cot";
-String URL = "http://emonpi.local/input/post";
-//String URL = "http://emonpi.local/emoncms/input/post";
-//String URL = "http://Macintosh-Gouk-New.local:8002/input/post";
-const char* msgBody= "node=%node&fulljson=%json&apikey=%apiKey";
-const char* nodeName = "ASHP";
-const char* apiKey = "0e2988b2400a4ca9cb856015529de7f4";
-const bool doHttpGet = true; // Controls use of GET vs POST...
-
-/*
-  Example HTTP GET
-  GET:http://emonpi.local/input/post?node=mynode&fulljson={"power1":100,"power2":200,"power3":300}&apikey=fc9c9ae50942b35f8a1baa67649e301b
-
-  Example HTTP POST
-  URL: http://emonpi.local/input/post
-  BODY: node=mynode&fulljson={"power1":100,"power2":200,"power3":300}&apikey=fc9c9ae50942b35f8a1baa67649e301b
-*/
+const char* mqtt_server = "emonpi.local";
+#define mqtt_user "emonpi"
+#define mqtt_pwd "emonpimqtt2016"
+const char* baseTopic = "emon/ASHP/";
 
 #include <ModbusRTUMaster.h>
 #ifdef ESP8266
@@ -68,12 +46,11 @@ ModbusRTUMaster modbus(modbusSerial);
 #define MODBUS_REG_START 0
 #define MODBUS_REG_COUNT 9
 
-#include <HTTPClient.h>
+#include <PubSubClient.h>
 
 WiFiClient espClient;
+PubSubClient client(espClient);
 
-// I used these names because they matched the names from my previous energy monitor,
-// and I didn't want to lose all the data I already had by using different ones
 const char * valueNames[] = {
     "voltage",
     "current_b",
@@ -95,13 +72,10 @@ struct energyData {
 // which is here
 uint16_t dataBuf[sizeof(energyData)/2];
 
-#define MAX_DATA_SIZE 250
-char jsonbuff[MAX_DATA_SIZE] = "{\0";
+#define MAX_MSG_SIZE 250
+char jsonbuff[MAX_MSG_SIZE] = "{\0";
 #define MAX_VALUE_SIZE 50
 char valueBuf[MAX_VALUE_SIZE] = "\0";
-
-// NTP server to request epoch time
-const char* ntpServer = "pool.ntp.org";
 
 void setup_wifi() {
 
@@ -125,6 +99,41 @@ void setup_wifi() {
   Serial.print("[setup_wifi] wifi connected: ");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+}
+
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("[mqtt_callback] Message arrived: ");
+  Serial.print(topic);
+  Serial.print(" ");
+  for (unsigned int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println("]");
+
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.printf("[reconnect] Client state = %d\n", client.state());
+    Serial.print("[reconnect] Attempting MQTT connection...");
+    // Create a random client ID
+    String clientId = "ESP32Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (client.connect(clientId.c_str())) //, mqtt_user, mqtt_pwd) 
+    {
+      Serial.println("connected");
+      // ... and resubscribe
+      client.subscribe("inTopic");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
 }
 
 void startModbus() {
@@ -153,59 +162,25 @@ bool readModbusValues(){
     values[0] = dataBuf[0] * 0.1;                           // Voltage(0.1V)
     values[1] = (dataBuf[1] + (dataBuf[2] << 16)) * 0.001;  // Current(0.001A)
     values[2] = (dataBuf[3] + (dataBuf[4] << 16)) * 0.1;    // Power(0.1W)
-    values[3] = (dataBuf[5] + (dataBuf[6] << 16)) * 0.001;  // Energy(1Wh)
+    values[3] = (dataBuf[5] + (dataBuf[6] << 16)) * 0.001;  // Energy(1Wh -> kWh)
     values[4] = dataBuf[7] * 0.1;                           // Frequency
-	  values[5] = dataBuf[8] * 0.01;							            // Power Factor
-    memset(jsonbuff, 0, MAX_DATA_SIZE);
-    jsonbuff[0] = '{';
+	  values[5] = dataBuf[8] * 0.01;							// Power Factor
     Serial.print("[readModbusValues] values: ");
+    String mqtt_topic = baseTopic;
     for (int i = 0;i<6;i++){
-      Serial.printf("%s:%f ", valueNames[i], values[i]);
-      // Have to use URL encoding for the values
-      snprintf(jsonbuff + strlen(jsonbuff), MAX_DATA_SIZE - strlen(jsonbuff), "%%22%s%%22:%.3f,", valueNames[i], values[i]);
-      //TEST snprintf(jsonbuff + strlen(jsonbuff), MAX_DATA_SIZE - strlen(jsonbuff), "%s:%.3f,", valueNames[i], values[i]);
-      //TEST snprintf(jsonbuff + strlen(jsonbuff), MAX_DATA_SIZE - strlen(jsonbuff), "\"%s\":%.3f,", valueNames[i], values[i]);
+      Serial.printf(" %f ", values[i]);
+      snprintf(jsonbuff + strlen(jsonbuff), MAX_MSG_SIZE - strlen(jsonbuff), "\"%s\":%.3f,", valueNames[i], values[i]);
+      mqtt_topic.concat(valueNames[i]);
       snprintf(valueBuf + strlen(valueBuf), MAX_VALUE_SIZE - strlen(valueBuf), "%.3f", values[i]);
+      client.publish(mqtt_topic.c_str(), valueBuf);
+      mqtt_topic = baseTopic;
       strcpy(valueBuf, "\0x");
     }
-    jsonbuff[strlen(jsonbuff) - 1] = '}'; // Overwrite the last ","
+    jsonbuff[strlen(jsonbuff) - 1] = '}';
     Serial.println("]");
     Serial.printf("[readModbusValues] JSON: %s\n", jsonbuff);
-    String payload(msgBody);  // It's ok to do this in a String because it gets binned after each function call
-    payload.replace("%node", nodeName);
-    payload.replace("%json", jsonbuff);
-    payload.replace("%apiKey", apiKey);
-    Serial.printf("[%s]\n", payload.c_str());
-    int httpResult;
-    HTTPClient httpClient;
-    String action;
-    if (doHttpGet){
-      action = "GET";
-      String getURL = URL + "?" + payload;
-      Serial.printf("[HTTP] URL: %s\n", getURL.c_str());
-      httpClient.begin(getURL);
-      httpResult = httpClient.GET();
-    } else{
-      action = "POST";
-      Serial.printf("[HTTP] URL: %s\n", URL.c_str());
-      const String headerName = "Content-Type";
-      const String headerValue = "application/x-www-form-urlencoded";
-      httpClient.begin(URL);
-      httpClient.addHeader(headerName, headerValue, false, true);
-      httpResult = httpClient.POST(payload);  
-    }
-    if (httpResult > 0) {
-      if (httpResult == HTTP_CODE_OK){
-        String resultData = httpClient.getString();
-        Serial.printf("[HTTP] Result: %s\n", resultData.c_str());
-      } else {
-        Serial.printf("[HTTP] %s return code %d\n", action.c_str(), httpResult);
-      }
-    } else {
-      Serial.printf("[HTTP] Error on %s call %d\n", action.c_str(), httpResult);
-    }
-    //httpClient.writeToStream(&Serial);  // Print the response body
-    httpClient.end();
+    client.publish("test/PowerData", jsonbuff);
+    strcpy(jsonbuff, "{\0");
 
   } else {
     Serial.print("[readModbusValues] error reading modbus");
@@ -241,10 +216,8 @@ bool readModbusValues(){
 
 }
 
-
 void setup() {
   Serial.begin(115200);
-  esp_log_level_set(LOG_NAME, ESP_LOG_DEBUG);
 
   Serial.println("[setup] started");
   Serial.println("[setup] modbus starting");
@@ -252,27 +225,22 @@ void setup() {
   Serial.println("[setup] modbus started");
 
   setup_wifi();
-  //httpClient.useHTTP10(true);
-
-  //         GMT_offset, DST_offset, server1...
-  configTime(0, 0, ntpServer);
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(mqtt_callback);
 
 }
 
 void loop() {
   bool result;
   Serial.println("[loop]");
-  result = readModbusValues();
-  Serial.flush();
-  struct tm timeInfo;
-  // configTime used GMT :-) so UTC is local time
-  if (!getLocalTime(&timeInfo)) { 
-      Serial.println("[loop] Failed to obtain time");
-      return;
+  if (!client.connected()) {
+    reconnect();
   }
-  const size_t ISO_TIME_LEN = 21; // Include terminator
-  char timeStr[ISO_TIME_LEN];
-  strftime(timeStr, ISO_TIME_LEN, "%FT%TZ", &timeInfo);
+  client.loop();
 
+  result = readModbusValues();
+
+  Serial.flush();
   delay(10000);
+
 }
