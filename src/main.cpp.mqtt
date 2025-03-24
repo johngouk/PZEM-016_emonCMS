@@ -8,19 +8,31 @@
   2024-08-05  Revised for individual messages, one per Topic, and to use appropriate names
               for the topics, so they match my existing setup. That way I don't lose all
               my previous data when I have to reconfigure the Inputs/Feeds
+  2025-03-15  Added heap size logging 
 
 */
 
 #include <Arduino.h>
+
+#include <multi_heap.h> // Used to get heap size data
 
 // Update these with values suitable for your network.
 
 const char* ssid = "norcot";
 const char* password = "nor265cot";
 const char* mqtt_server = "emonpi.local";
-#define mqtt_user "emonpi"
-#define mqtt_pwd "emonpimqtt2016"
-const char* baseTopic = "emon/ASHP/";
+const int mqtt_port = 1883;
+const char* mqtt_user = "emonpi";
+const char* mqtt_pwd = "emonpimqtt2016";
+const char* baseTopic = "emon/testASHP/";
+
+/*
+const char* mqtt_server = "test.mosquitto.org";
+const int mqtt_port = 1884;
+const char* mqtt_user = "rw";
+const char* mqtt_pwd = "readwrite";
+const char* baseTopic = "gouk/";
+*/
 
 #include <ModbusRTUMaster.h>
 #ifdef ESP8266
@@ -48,8 +60,13 @@ ModbusRTUMaster modbus(modbusSerial);
 
 #include <PubSubClient.h>
 
+#include <resolveHostname.h>
+
 WiFiClient espClient;
+//#define MQTT_VERSION MQTT_VERSION_3_1_1
 PubSubClient client(espClient);
+
+IPAddress mqtt_ip;
 
 const char * valueNames[] = {
     "voltage",
@@ -79,7 +96,7 @@ char valueBuf[MAX_VALUE_SIZE] = "\0";
 
 void setup_wifi() {
 
-  delay(10);
+  //delay(5);
   // We start by connecting to a WiFi network
   Serial.println();
   Serial.print("[setup_wifi] connecting to ");
@@ -99,6 +116,14 @@ void setup_wifi() {
   Serial.print("[setup_wifi] wifi connected: ");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+  /*
+  int result = espClient.connect(mqtt_server, mqtt_port);
+  if (result){
+    IPAddress remoteIP = espClient.remoteIP();
+    Serial.printf("[setup_wifi] TestMQTTConnect: RemoteIP: %s\n", remoteIP.toString().c_str());
+    espClient.stop();
+  }
+  */
 }
 
 void mqtt_callback(char* topic, byte* payload, unsigned int length) {
@@ -114,14 +139,16 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 
 void reconnect() {
   // Loop until we're reconnected
-  while (!client.connected()) {
+  int attempts = 0;
+  while ((!client.connected())&&(attempts<10)) {
+    attempts++;
     Serial.printf("[reconnect] Client state = %d\n", client.state());
     Serial.print("[reconnect] Attempting MQTT connection...");
     // Create a random client ID
     String clientId = "ESP32Client-";
     clientId += String(random(0xffff), HEX);
     // Attempt to connect
-    if (client.connect(clientId.c_str())) //, mqtt_user, mqtt_pwd) 
+    if (client.connect(clientId.c_str(), mqtt_user, mqtt_pwd) && (client.connected()))
     {
       Serial.println("connected");
       // ... and resubscribe
@@ -133,6 +160,10 @@ void reconnect() {
       // Wait 5 seconds before retrying
       delay(5000);
     }
+  }
+  if (client.connected()){
+    IPAddress remoteIP = espClient.remoteIP();
+    Serial.printf("[reconnect] Remote IP: %s\n", remoteIP.toString().c_str());
   }
 }
 
@@ -150,6 +181,10 @@ bool readModbusValues(){
   }
   bool result = 0;
   result = modbus.readInputRegisters(MODBUS_SLAVE_ADDR, MODBUS_REG_START, dataBuf, MODBUS_REG_COUNT);
+  /* */
+  // Fake it out for now
+  //result = true;
+  /* */
   if (result) {
     Serial.println("[readModbusValues] modbus read successful");
     Serial.print("[readModbusValues] hex: ");
@@ -164,8 +199,17 @@ bool readModbusValues(){
     values[2] = (dataBuf[3] + (dataBuf[4] << 16)) * 0.1;    // Power(0.1W)
     values[3] = (dataBuf[5] + (dataBuf[6] << 16)) * 0.001;  // Energy(1Wh -> kWh)
     values[4] = dataBuf[7] * 0.1;                           // Frequency
-	  values[5] = dataBuf[8] * 0.01;							// Power Factor
-    Serial.print("[readModbusValues] values: ");
+	  values[5] = dataBuf[8] * 0.01;							            // Power Factor
+    /*
+    // Faking it
+    values[0] = 249.1;                           // Voltage(0.1V)
+    values[1] = 10.123;     // Current(0.001A)
+    values[2] = 1234.1;     // Power(0.1W)
+    values[3] = 3500.123;   // Energy(1Wh -> kWh)
+    values[4] = 49.1;       // Frequency
+	  values[5] = 93.1;       // Power Factor
+    */
+   Serial.print("[readModbusValues] values: ");
     String mqtt_topic = baseTopic;
     for (int i = 0;i<6;i++){
       Serial.printf(" %f ", values[i]);
@@ -173,6 +217,7 @@ bool readModbusValues(){
       mqtt_topic.concat(valueNames[i]);
       snprintf(valueBuf + strlen(valueBuf), MAX_VALUE_SIZE - strlen(valueBuf), "%.3f", values[i]);
       client.publish(mqtt_topic.c_str(), valueBuf);
+      Serial.printf("Topic:%s Data:%s\n", mqtt_topic.c_str(), valueBuf);
       mqtt_topic = baseTopic;
       strcpy(valueBuf, "\0x");
     }
@@ -217,6 +262,7 @@ bool readModbusValues(){
 }
 
 void setup() {
+  delay(5000);
   Serial.begin(115200);
 
   Serial.println("[setup] started");
@@ -225,22 +271,39 @@ void setup() {
   Serial.println("[setup] modbus started");
 
   setup_wifi();
-  client.setServer(mqtt_server, 1883);
+  Serial.printf("[setup] MQTT: Host: %s Port: %d User: %s Pwd: %s\n", mqtt_server, mqtt_port, mqtt_user, mqtt_pwd);
+  bool result = resolveHostname(mqtt_server, mqtt_ip);
+  if (result) {
+    Serial.printf("[setup] MQTT IP: %s\n", mqtt_ip.toString().c_str());
+    client.setServer(mqtt_ip, mqtt_port); // Need to use mDNS directly, WiFiClient doesn't work properly
+  } else {
+    client.setServer(mqtt_server, mqtt_port); // Ah fuck it
+  }
   client.setCallback(mqtt_callback);
 
 }
 
+void reportHeap(int loc){
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); // internal RAM, memory capable to store data or to create new task
+  // total currently free in all non-continues blocks
+  // minimum free ever
+  // largest continues block to allocate big array
+  Serial.printf("[heap %d] Total free:%d Min. free: %d Largest free block: %d\n", loc, 
+                info.total_free_bytes, info.minimum_free_bytes, info.largest_free_block);
+}
+
 void loop() {
+  reportHeap(1);
   bool result;
   Serial.println("[loop]");
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
-
+  reportHeap(2);
   result = readModbusValues();
-
+  reportHeap(3);
   Serial.flush();
   delay(10000);
-
 }

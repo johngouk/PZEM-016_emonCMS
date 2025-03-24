@@ -12,11 +12,13 @@
               that's loads more reliable than MQTT and less grief... or so I thought!! Had to add URL encoding
               to the payload for both GET and POST, also some random 404s etc. from the EmonCMS instance
               Maybe MQTT is better?!
+  2025-03-15  Added heap size logging 
 
 */
 
 #include <Arduino.h>
 #include <time.h>
+#include <multi_heap.h>
 
 #define MY_LOG_LEVEL ESP_LOG_DEBUG
 #include <esp_log.h>  // have to include this manually
@@ -132,6 +134,24 @@ void startModbus() {
     modbus.setTimeout(200);
 }
 
+/*
+  url_escape
+  Uses URL-style escaping on whatever string it gets given, a JSON string in this instance
+*/
+String url_escape(String s){ // Translate payload to URL-encoded
+  String value = "";
+  for (int i=0;i<s.length();i++){
+    if (isalpha(s[i]) || isdigit(s[i])){
+      value = value + s[i];
+    } else {
+      int a = (unsigned char) s[i];
+      String escaped = '%' + String(a, HEX);
+      value = value + escaped;
+    }
+  }
+  return value;
+}
+
 bool readModbusValues(){
   // Test data to check printf works
   uint16_t dummy = 0x0101;
@@ -162,7 +182,7 @@ bool readModbusValues(){
     for (int i = 0;i<6;i++){
       Serial.printf("%s:%f ", valueNames[i], values[i]);
       // Have to use URL encoding for the values
-      snprintf(jsonbuff + strlen(jsonbuff), MAX_DATA_SIZE - strlen(jsonbuff), "%%22%s%%22:%.3f,", valueNames[i], values[i]);
+      snprintf(jsonbuff + strlen(jsonbuff), MAX_DATA_SIZE - strlen(jsonbuff), "\"%s\":%.3f,", valueNames[i], values[i]);
       //TEST snprintf(jsonbuff + strlen(jsonbuff), MAX_DATA_SIZE - strlen(jsonbuff), "%s:%.3f,", valueNames[i], values[i]);
       //TEST snprintf(jsonbuff + strlen(jsonbuff), MAX_DATA_SIZE - strlen(jsonbuff), "\"%s\":%.3f,", valueNames[i], values[i]);
       snprintf(valueBuf + strlen(valueBuf), MAX_VALUE_SIZE - strlen(valueBuf), "%.3f", values[i]);
@@ -171,9 +191,11 @@ bool readModbusValues(){
     jsonbuff[strlen(jsonbuff) - 1] = '}'; // Overwrite the last ","
     Serial.println("]");
     Serial.printf("[readModbusValues] JSON: %s\n", jsonbuff);
+    String jsonString = jsonbuff;
+    String urlJson = url_escape(jsonString);
     String payload(msgBody);  // It's ok to do this in a String because it gets binned after each function call
     payload.replace("%node", nodeName);
-    payload.replace("%json", jsonbuff);
+    payload.replace("%json", urlJson);
     payload.replace("%apiKey", apiKey);
     Serial.printf("[%s]\n", payload.c_str());
     int httpResult;
@@ -195,9 +217,10 @@ bool readModbusValues(){
       httpResult = httpClient.POST(payload);  
     }
     if (httpResult > 0) {
+      String resultData = httpClient.getString();
+      Serial.printf("[HTTP] Result: %s\n", resultData.c_str());
       if (httpResult == HTTP_CODE_OK){
-        String resultData = httpClient.getString();
-        Serial.printf("[HTTP] Result: %s\n", resultData.c_str());
+        ;
       } else {
         Serial.printf("[HTTP] %s return code %d\n", action.c_str(), httpResult);
       }
@@ -259,10 +282,22 @@ void setup() {
 
 }
 
+void reportHeap(int loc){
+  multi_heap_info_t info;
+  heap_caps_get_info(&info, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); // internal RAM, memory capable to store data or to create new task
+  // total currently free in all non-continues blocks
+  // minimum free ever
+  // largest continues block to allocate big array
+  Serial.printf("[heap %d] Total free:%d Min. free: %d Largest free block: %d\n", loc, 
+                info.total_free_bytes, info.minimum_free_bytes, info.largest_free_block);
+}
+
 void loop() {
+  reportHeap(1);
   bool result;
   Serial.println("[loop]");
   result = readModbusValues();
+  reportHeap(2);
   Serial.flush();
   struct tm timeInfo;
   // configTime used GMT :-) so UTC is local time
@@ -273,6 +308,6 @@ void loop() {
   const size_t ISO_TIME_LEN = 21; // Include terminator
   char timeStr[ISO_TIME_LEN];
   strftime(timeStr, ISO_TIME_LEN, "%FT%TZ", &timeInfo);
-
+  reportHeap(3);
   delay(10000);
 }
