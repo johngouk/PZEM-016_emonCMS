@@ -33,9 +33,14 @@ String URL = "http://emonpi.local/input/post";
 //String URL = "http://emonpi.local/emoncms/input/post";
 //String URL = "http://Macintosh-Gouk-New.local:8002/input/post";
 const char* msgBody= "node=%node&fulljson=%json&apikey=%apiKey";
-const char* nodeName = "ASHP";
+const char* nodeName = "testASHP";
 const char* apiKey = "0e2988b2400a4ca9cb856015529de7f4";
 const bool doHttpGet = true; // Controls use of GET vs POST...
+
+String hostName;
+IPAddress hostIp;
+String uri;
+uint16_t hostPort = 80;
 
 /*
   Example HTTP GET
@@ -69,6 +74,9 @@ ModbusRTUMaster modbus(modbusSerial);
 #define MODBUS_SLAVE_ADDR 1
 #define MODBUS_REG_START 0
 #define MODBUS_REG_COUNT 9
+
+//#include <resolveHostname.h>
+#include <parseURL.h>
 
 #include <HTTPClient.h>
 
@@ -161,6 +169,10 @@ bool readModbusValues(){
   }
   bool result = 0;
   result = modbus.readInputRegisters(MODBUS_SLAVE_ADDR, MODBUS_REG_START, dataBuf, MODBUS_REG_COUNT);
+  /* */
+  // Fake it out for now
+  result = true;
+  /* */
   if (result) {
     Serial.println("[readModbusValues] modbus read successful");
     Serial.print("[readModbusValues] hex: ");
@@ -170,12 +182,22 @@ bool readModbusValues(){
     }
     Serial.println("");
     float values [6];
+    /*
     values[0] = dataBuf[0] * 0.1;                           // Voltage(0.1V)
     values[1] = (dataBuf[1] + (dataBuf[2] << 16)) * 0.001;  // Current(0.001A)
     values[2] = (dataBuf[3] + (dataBuf[4] << 16)) * 0.1;    // Power(0.1W)
     values[3] = (dataBuf[5] + (dataBuf[6] << 16)) * 0.001;  // Energy(1Wh)
     values[4] = dataBuf[7] * 0.1;                           // Frequency
 	  values[5] = dataBuf[8] * 0.01;							            // Power Factor
+    */
+    // Faking it
+    values[0] = 249.1;                           // Voltage(0.1V)
+    values[1] = 10.123;     // Current(0.001A)
+    values[2] = 1234.1;     // Power(0.1W)
+    values[3] = 3500.123;   // Energy(1Wh -> kWh)
+    values[4] = 49.1;       // Frequency
+	  values[5] = 93.1;       // Power Factor
+
     memset(jsonbuff, 0, MAX_DATA_SIZE);
     jsonbuff[0] = '{';
     Serial.print("[readModbusValues] values: ");
@@ -203,16 +225,20 @@ bool readModbusValues(){
     String action;
     if (doHttpGet){
       action = "GET";
-      String getURL = URL + "?" + payload;
+      //String getURL = URL + "?" + payload;
+      String getURL = uri + "?" + payload;
       Serial.printf("[HTTP] URL: %s\n", getURL.c_str());
-      httpClient.begin(getURL);
+      //httpClient.begin(URL);
+      httpClient.begin(hostIp.toString(), hostPort, getURL);
       httpResult = httpClient.GET();
     } else{
       action = "POST";
-      Serial.printf("[HTTP] URL: %s\n", URL.c_str());
+      //Serial.printf("[HTTP] URL: %s\n", URL.c_str());
+      Serial.printf("[HTTP] URL: %s\n", uri.c_str());
       const String headerName = "Content-Type";
       const String headerValue = "application/x-www-form-urlencoded";
-      httpClient.begin(URL);
+      //httpClient.begin(URL);
+      httpClient.begin(hostIp.toString(), hostPort, uri);
       httpClient.addHeader(headerName, headerValue, false, true);
       httpResult = httpClient.POST(payload);  
     }
@@ -266,6 +292,7 @@ bool readModbusValues(){
 
 
 void setup() {
+  delay(5000);
   Serial.begin(115200);
   esp_log_level_set(LOG_NAME, ESP_LOG_DEBUG);
 
@@ -275,7 +302,13 @@ void setup() {
   Serial.println("[setup] modbus started");
 
   setup_wifi();
-  //httpClient.useHTTP10(true);
+  
+  bool result = parseURL(URL, hostName, hostIp, hostPort, uri);
+  if (result) {
+    Serial.printf("[setup] Host: Name: %s IP: %s Port: %d URI: %s\n", hostName.c_str(), hostIp.toString().c_str(), hostPort, uri.c_str());
+  } else {
+    Serial.printf("[setup] Can't resolve fucking URL % - going home\n", URL.c_str());
+  }
 
   //         GMT_offset, DST_offset, server1...
   configTime(0, 0, ntpServer);
