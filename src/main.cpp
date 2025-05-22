@@ -24,7 +24,7 @@ const char* mqtt_server = "emonpi.local";
 const int mqtt_port = 1883;
 const char* mqtt_user = "emonpi";
 const char* mqtt_pwd = "emonpimqtt2016";
-const char* baseTopic = "emon/testASHP/";
+const char* baseTopic = "emon/ASHP/";
 
 /*
 const char* mqtt_server = "test.mosquitto.org";
@@ -293,6 +293,11 @@ void reportHeap(int loc){
                 info.total_free_bytes, info.minimum_free_bytes, info.largest_free_block);
 }
 
+const int delayIntervalSec = 10;
+const int delayIntervalmSec = delayIntervalSec * 1000;;
+const int pollsPerDay = 60 / delayIntervalSec * 24 * 60;
+int pollCount = 0;
+
 void loop() {
   reportHeap(1);
   bool result;
@@ -305,5 +310,10 @@ void loop() {
   result = readModbusValues();
   reportHeap(3);
   Serial.flush();
-  delay(10000);
+  pollCount += 1;
+  if (pollCount >= pollsPerDay){
+    // Restart!! for safety - do this now so it takes maybe 10 secs...
+    ESP.restart();
+  }
+  delay(delayIntervalmSec);
 }

@@ -33,7 +33,7 @@ String URL = "http://emonpi.local/input/post";
 //String URL = "http://emonpi.local/emoncms/input/post";
 //String URL = "http://Macintosh-Gouk-New.local:8002/input/post";
 const char* msgBody= "node=%node&fulljson=%json&apikey=%apiKey";
-const char* nodeName = "testASHP";
+const char* nodeName = "ASHP";
 const char* apiKey = "0e2988b2400a4ca9cb856015529de7f4";
 const bool doHttpGet = true; // Controls use of GET vs POST...
 
