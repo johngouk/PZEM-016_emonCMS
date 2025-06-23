@@ -9,12 +9,25 @@
               for the topics, so they match my existing setup. That way I don't lose all
               my previous data when I have to reconfigure the Inputs/Feeds
   2025-03-15  Added heap size logging 
+  2025-06-23  Improved MQTT Hub and MQTT Client connection checks, added WDT just in case!
 
 */
 
 #include <Arduino.h>
 
 #include <multi_heap.h> // Used to get heap size data
+#include <esp_task_wdt.h> // The WatchDog Timer, used to make sure this doesn't freeze up
+
+const int WDT_TIMEOUT_SETUP = 60;
+const int WDT_TIMEOUT_LOOP = 20;
+
+// Loop control timer values
+const int delayIntervalSec = 10;
+const int delayIntervalmSec = delayIntervalSec * 1000;
+const int pollsPerDay = 60 / delayIntervalSec * 24 * 60;
+//const int pollsPerDay = 5; // Test value!
+int pollCount = 0;
+
 
 // Update these with values suitable for your network.
 
@@ -62,9 +75,9 @@ ModbusRTUMaster modbus(modbusSerial);
 
 #include <resolveHostname.h>
 
-WiFiClient espClient;
+WiFiClient mqttHub;
 //#define MQTT_VERSION MQTT_VERSION_3_1_1
-PubSubClient client(espClient);
+PubSubClient mqttClient(mqttHub);
 
 IPAddress mqtt_ip;
 
@@ -137,33 +150,40 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 
 }
 
-void reconnect() {
+bool reconnect() {
   // Loop until we're reconnected
   int attempts = 0;
-  while ((!client.connected())&&(attempts<10)) {
+  const int maxAttempts = 3;
+  //Serial.printf("[reconnect] True: %d False: %d\n", true, false);
+  Serial.printf("[reconnect] start: MQTT Hub connected %d; MQTT Client connected %d \n", mqttHub.connected(), mqttClient.connected());
+  while ((!mqttClient.connected())&&(attempts<maxAttempts)) {
     attempts++;
-    Serial.printf("[reconnect] Client state = %d\n", client.state());
-    Serial.print("[reconnect] Attempting MQTT connection...");
+    // Serial.printf("[reconnect] Client state = %d Attempt %d\n", client.state(), attempts);
+    Serial.printf("[reconnect] Attempting MQTT Client connection %d ...", attempts);
     // Create a random client ID
     String clientId = "ESP32Client-";
     clientId += String(random(0xffff), HEX);
     // Attempt to connect
-    if (client.connect(clientId.c_str(), mqtt_user, mqtt_pwd) && (client.connected()))
+    if (mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_pwd) && (mqttClient.connected()))
     {
       Serial.println("connected");
       // ... and resubscribe
-      client.subscribe("inTopic");
+      mqttClient.subscribe("inTopic");
     } else {
       Serial.print("failed, rc=");
-      Serial.print(client.state());
+      Serial.print(mqttClient.state());
       Serial.println(" try again in 5 seconds");
       // Wait 5 seconds before retrying
       delay(5000);
     }
   }
-  if (client.connected()){
-    IPAddress remoteIP = espClient.remoteIP();
-    Serial.printf("[reconnect] Remote IP: %s\n", remoteIP.toString().c_str());
+  Serial.printf("[reconnect] end: MQTT Hub connected %d; MQTT Client connected %d \n", mqttHub.connected(), mqttClient.connected());
+  if (mqttClient.connected()){
+    IPAddress remoteIP = mqttHub.remoteIP();
+    Serial.printf("[reconnect] MQTT Hub IP: %s\n", remoteIP.toString().c_str());
+    return true;
+  } else {
+    return false;
   }
 }
 
@@ -216,15 +236,15 @@ bool readModbusValues(){
       snprintf(jsonbuff + strlen(jsonbuff), MAX_MSG_SIZE - strlen(jsonbuff), "\"%s\":%.3f,", valueNames[i], values[i]);
       mqtt_topic.concat(valueNames[i]);
       snprintf(valueBuf + strlen(valueBuf), MAX_VALUE_SIZE - strlen(valueBuf), "%.3f", values[i]);
-      client.publish(mqtt_topic.c_str(), valueBuf);
+      mqttClient.publish(mqtt_topic.c_str(), valueBuf);
       Serial.printf("Topic:%s Data:%s\n", mqtt_topic.c_str(), valueBuf);
       mqtt_topic = baseTopic;
-      strcpy(valueBuf, "\0x");
+      strcpy(valueBuf, "\0");
     }
     jsonbuff[strlen(jsonbuff) - 1] = '}';
     Serial.println("]");
     Serial.printf("[readModbusValues] JSON: %s\n", jsonbuff);
-    client.publish("test/PowerData", jsonbuff);
+    mqttClient.publish("test/PowerData", jsonbuff);
     strcpy(jsonbuff, "{\0");
 
   } else {
@@ -261,25 +281,51 @@ bool readModbusValues(){
 
 }
 
+bool setup_MQTT(){
+  Serial.printf("[setup_MQTT] MQTT: Host: %s Port: %d User: %s Pwd: %s\n", mqtt_server, mqtt_port, mqtt_user, mqtt_pwd);
+  mqttClient.setCallback(mqtt_callback);
+  bool result = resolveHostname(mqtt_server, mqtt_ip);
+  if (result) {
+    Serial.printf("[setup_MQTT] MQTT Hub IP: %s\n", mqtt_ip.toString().c_str());
+    mqttClient.setServer(mqtt_ip, mqtt_port); // Need to use mDNS directly, WiFiClient doesn't work properly
+    mqttHub.connect(mqtt_ip, mqtt_port);
+  } else {
+    Serial.printf("[setup_MQTT] Using MQTT Hub hostname! %s \n", mqtt_server);
+    mqttClient.setServer(mqtt_server, mqtt_port); // Ah fuck it
+    mqttHub.connect(mqtt_server, mqtt_port);
+  }
+  Serial.printf("[setup_MQTT] MQTT Hub Connected: %d MQTT Client Connected: %d\n", mqttHub.connected(), mqttClient.connected());
+  if (!mqttHub.connected()){
+    Serial.println("[setup_MQTT] Unable to connect to MQTT Hub - exiting");
+    return false;
+  } else
+    return true;
+}
+
 void setup() {
   delay(5000);
   Serial.begin(115200);
 
   Serial.println("[setup] started");
+  randomSeed(micros());
+
+  Serial.printf("[setup] configuring WDT %d seconds\n", WDT_TIMEOUT_SETUP);
+  Serial.flush();
+  esp_task_wdt_init(WDT_TIMEOUT_SETUP, true); //enable panic so ESP32 restarts
+  Serial.printf("[setup] adding task to WDT \n");
+  Serial.flush();
+  esp_task_wdt_add(NULL); //add current thread to WDT watch
+
   Serial.println("[setup] modbus starting");
   startModbus();
   Serial.println("[setup] modbus started");
 
   setup_wifi();
-  Serial.printf("[setup] MQTT: Host: %s Port: %d User: %s Pwd: %s\n", mqtt_server, mqtt_port, mqtt_user, mqtt_pwd);
-  bool result = resolveHostname(mqtt_server, mqtt_ip);
-  if (result) {
-    Serial.printf("[setup] MQTT IP: %s\n", mqtt_ip.toString().c_str());
-    client.setServer(mqtt_ip, mqtt_port); // Need to use mDNS directly, WiFiClient doesn't work properly
-  } else {
-    client.setServer(mqtt_server, mqtt_port); // Ah fuck it
-  }
-  client.setCallback(mqtt_callback);
+  if (!setup_MQTT()) ESP.restart();; // Sets up MQTT client, including TCP connection to server
+
+  Serial.println("[setup] resetting WDT...");
+  esp_task_wdt_init((WDT_TIMEOUT_LOOP + delayIntervalSec), true); //enable panic so ESP32 restarts
+  esp_task_wdt_add(NULL); //add current thread to WDT watch
 
 }
 
@@ -293,19 +339,20 @@ void reportHeap(int loc){
                 info.total_free_bytes, info.minimum_free_bytes, info.largest_free_block);
 }
 
-const int delayIntervalSec = 10;
-const int delayIntervalmSec = delayIntervalSec * 1000;;
-const int pollsPerDay = 60 / delayIntervalSec * 24 * 60;
-int pollCount = 0;
-
 void loop() {
+  time_t start = millis();
+  esp_task_wdt_reset(); // Phew, we made around another loop!
+  Serial.printf("[loop] start: %d\n", start);
   reportHeap(1);
   bool result;
   Serial.println("[loop]");
-  if (!client.connected()) {
-    reconnect();
+  if (!mqttClient.connected()) {
+    if (not(reconnect())) {
+      // Restart!! for safety - do this now so it takes maybe 10 secs...
+      ESP.restart();
+    };
   }
-  client.loop();
+  mqttClient.loop(); // Let MQTT Client do its thing
   reportHeap(2);
   result = readModbusValues();
   reportHeap(3);
@@ -313,7 +360,11 @@ void loop() {
   pollCount += 1;
   if (pollCount >= pollsPerDay){
     // Restart!! for safety - do this now so it takes maybe 10 secs...
+    Serial.println("Poll count reached - executing restart");
+    Serial.flush();
+    //delay(WDT_TIMEOUT_LOOP * 2 * 1000); // Make sure WDT blows - TEST!
     ESP.restart();
   }
-  delay(delayIntervalmSec);
+  Serial.printf("[loop] time millis: %d\n", millis() - start);
+  delay(delayIntervalmSec - (millis() - start));
 }
